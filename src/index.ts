@@ -5,47 +5,101 @@
  */
 
 import { Command } from "commander";
-import { existsSync, readFileSync } from "fs";
-import { join } from "path";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { AgentEnvironmentBridge } from "./core/bridge.js";
+import { BridgeConfig } from "./types/index.js";
 
-interface Config {
-  apiKey?: string;
-  baseUrl: string;
-  timeout: number;
-  retries: number;
-}
-
-const DEFAULTS: Config = {
-  baseUrl: "https://api.example.com",
-  timeout: 30000,
-  retries: 3,
+const DEFAULT_CONFIG: BridgeConfig = {
+  name: "agent-environment-bridge",
+  version: "1.0.0",
+  auditPath: "./logs/audit.jsonl",
+  security: {
+    enableInputValidation: true,
+    enableOutputFiltering: true,
+    maskSensitiveData: true,
+    blockedKeywords: ["/etc/passwd", "/etc/shadow", "rm -rf /"],
+    allowedCommands: ["ls", "cat", "grep", "echo"]
+  },
+  adapters: [
+    {
+      id: "local-shell",
+      type: "shell",
+      name: "Local Shell Access",
+      permissions: ["ls", "cat"],
+      options: {
+        cwd: process.cwd(),
+        timeout: 5000
+      }
+    },
+    {
+      id: "public-api",
+      type: "rest",
+      name: "Public REST API",
+      permissions: ["*"],
+      options: {
+        baseUrl: "https://jsonplaceholder.typicode.com",
+        timeout: 10000
+      }
+    }
+  ]
 };
 
-function loadConfig(): Config {
-  const cfgPath = join(process.cwd(), "config.json");
-  if (existsSync(cfgPath)) {
+function loadConfig(path: string): BridgeConfig {
+  if (existsSync(path)) {
     try {
-      return { ...DEFAULTS, ...JSON.parse(readFileSync(cfgPath, "utf-8")) };
-    } catch { /* ignore */ }
+      const content = readFileSync(path, "utf-8");
+      return { ...DEFAULT_CONFIG, ...JSON.parse(content) };
+    } catch (e) {
+      console.warn(`Failed to load config from ${path}, using defaults.`);
+    }
   }
-  return { ...DEFAULTS };
-}
-
-async function main(cfg: Config) {
-  console.log(`[${name}] Connected to ${cfg.baseUrl}`);
-  console.log(`[${name}] Timeout: ${cfg.timeout}ms | Retries: ${cfg.retries}`);
-  // TODO: implement your logic here
-  console.log(`[${name}] Done.`);
+  return DEFAULT_CONFIG;
 }
 
 const program = new Command();
-program.name("agent-environment-bridge").description("Secure interface for agents to interact with legacy systems and non-AI APIs").version("1.0.0")
-  .option("-c, --config <path>", "Config file path", "config.json")
-  .option("-v, --verbose", "Verbose mode")
+
+program
+  .name("agent-environment-bridge")
+  .description("Secure interface for agents to interact with legacy systems and non-AI APIs")
+  .version("1.0.0");
+
+program
+  .command("run")
+  .description("Execute an action through the bridge")
+  .requiredOption("-a, --adapter <id>", "Adapter ID")
+  .requiredOption("-x, --action <name>", "Action/Path/Command")
+  .option("-p, --params <json>", "Parameters as JSON string", "{}")
+  .option("-c, --config <path>", "Path to config file", "config.json")
   .action(async (opts) => {
-    const cfg = loadConfig();
-    if (opts.verbose) console.log("Verbose mode on");
-    try { await main(cfg); }
-    catch (e) { console.error(`Error: ${e}`); process.exit(1); }
+    const config = loadConfig(opts.config);
+    const bridge = new AgentEnvironmentBridge(config);
+    
+    let params = {};
+    try {
+      params = JSON.parse(opts.params);
+    } catch (e) {
+      console.error("Invalid JSON in params");
+      process.exit(1);
+    }
+
+    const response = await bridge.handleRequest({
+      adapterId: opts.adapter,
+      action: opts.action,
+      params
+    });
+
+    console.log(JSON.stringify(response, null, 2));
+    if (!response.success) process.exit(1);
   });
+
+program
+  .command("config")
+  .description("Show current configuration")
+  .option("-c, --config <path>", "Path to config file", "config.json")
+  .action((opts) => {
+    const config = loadConfig(opts.config);
+    console.log(JSON.stringify(config, null, 2));
+  });
+
 program.parse(process.argv);
